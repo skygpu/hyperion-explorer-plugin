@@ -5,7 +5,7 @@ import {AccountCreationData, GetAccountResponse} from '../interfaces';
 import {default as HyperionStreamClient, IncomingData} from '@eosrio/hyperion-stream-client';
 import {MatTableDataSource} from '@angular/material/table';
 import {PaginationService} from './pagination.service';
-import {checkLinksForValidMedia} from 'src/utils';
+import {imageExists} from 'src/utils';
 
 
 interface HealthResponse {
@@ -261,13 +261,10 @@ export class AccountService {
     this.loaded = false;
     const result = []
     try {
-      const data = await this.httpClient.get(`${environment.hyperionApiUrl}/v2/history/get_actions?limit=5&account=gpu.scd&filter=gpu.scd%3Asubmit&sort=desc`).toPromise();
+      const data = await this.httpClient.get(`${environment.hyperionApiUrl}/v2/history/get_actions?limit=5&account=${environment.gpuContract}&filter=${environment.gpuContract}%3Asubmit&sort=desc`).toPromise();
       for (const action of data['actions']) {
-        let resultImageUrl = await checkLinksForValidMedia([
-            `${environment.ipfsUrl}${action.act.data.ipfs_hash}`,
-            `${environment.ipfsUrl}${action.act.data.ipfs_hash}/image.png`,
-        ]);
-        if (resultImageUrl) {
+        let resultImageUrl = `${environment.ipfsUrl}${action.act.data.ipfs_hash}`;
+        if (await imageExists(resultImageUrl)) {
           // thumbnail service
           resultImageUrl = `${environment.thumborUrl}/unsafe/300x300/${encodeURIComponent(resultImageUrl)}`;
           result.push([resultImageUrl, action.trx_id]);
@@ -295,7 +292,7 @@ export class AccountService {
   }
 
   async getBlockNonces(timestamp: number): Promise<any> {
-    const url = `${environment.hyperionApiUrl}/v2/history/get_deltas?code=gpu.scd&scope=gpu.scd&table=users&after=${timestamp}&before=${timestamp}`;
+    const url = `${environment.hyperionApiUrl}/v2/history/get_deltas?code=${environment.gpuContract}&scope=${environment.gpuContract}&table=users&after=${timestamp}&before=${timestamp}`;
 
     try {
       const response = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' } });

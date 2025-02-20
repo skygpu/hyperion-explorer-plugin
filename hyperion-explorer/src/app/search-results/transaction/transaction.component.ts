@@ -11,7 +11,7 @@ import { faSpinner } from '@fortawesome/free-solid-svg-icons/faSpinner';
 import { ChainService } from '../../services/chain.service';
 import { Title } from '@angular/platform-browser';
 import { environment } from '../../../environments/environment';
-import {checkLinksForValidMedia} from 'src/utils';
+import { imageExists } from 'src/utils';
 
 @Component({
   selector: 'app-transaction',
@@ -68,50 +68,9 @@ export class TransactionComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.activatedRoute.params.subscribe(async (routeParams) => {
+      // std hyperion tx init
       this.txID = routeParams.transaction_id;
       this.tx = await this.accountService.loadTxData(routeParams.transaction_id);
-      const inputTxId = await this.findEnqueueTXId(routeParams.transaction_id);
-      const inputTx = await this.accountService.loadTxData(inputTxId);
-      if (inputTx.actions[0].act.data.binary_data) {
-        this.inputTxText = JSON.parse(inputTx.actions[0].act.data.request_body).params.prompt;
-        this.inputTxUrl = `${environment.hyperionApiUrl}/v2/explore/transaction/${inputTxId}`;
-        const link = await checkLinksForValidMedia([
-            `${environment.ipfsUrl}${inputTx.actions[0].act.data.binary_data}`,
-            `${environment.ipfsUrl}${inputTx.actions[0].act.data.binary_data}/image.png`
-        ]);
-        if (link) {
-          this.ipfsInputImageUrl = `${environment.thumborUrl}/unsafe/512x512/${encodeURIComponent(link)}`;
-          this.hasInputImage = true;
-        } else
-          this.hasInputImage = false;
-      }
-      else {
-        this.inputTxText = JSON.parse(inputTx.actions[0].act.data.request_body).params.prompt;
-        this.inputTxUrl = `${environment.hyperionApiUrl}/v2/explore/transaction/${inputTxId};`
-        this.hasInputImage = false
-      }
-
-      if (this.tx.actions[0].act.data.ipfs_hash) {
-        this.ipfsImageUrl = this.tx.actions[0].act.data.ipfs_hash
-        const link = await checkLinksForValidMedia([
-            `${environment.ipfsUrl}${this.ipfsImageUrl}`,
-            `${environment.ipfsUrl}${this.ipfsImageUrl}/image.png`
-        ]);
-        if (link) {
-          this.ipfsImageUrl = `${environment.thumborUrl}/unsafe/512x512/${encodeURIComponent(link)}`;
-          this.hasImage = true;
-        } else
-          this.hasImage = false;
-      }
-      else {
-        this.hasImage = false
-      }
-
-      if (!this.chainData.chainInfoData.chain_name) {
-        this.title.setTitle(`TX ${routeParams.transaction_id.slice(0, 8)} • Hyperion Explorer`);
-      } else {
-        this.title.setTitle(`TX ${routeParams.transaction_id.slice(0, 8)} • ${this.chainData.chainInfoData.chain_name} Hyperion Explorer`);
-      }
 
       this.accountService.libNum = this.tx.lib;
       if (this.tx.actions[0].block_num > this.tx.lib) {
@@ -125,6 +84,81 @@ export class TransactionComponent implements OnInit, OnDestroy {
             }
           }
         }, 1000);
+      }
+
+      if (!this.chainData.chainInfoData.chain_name) {
+        this.title.setTitle(`TX ${routeParams.transaction_id.slice(0, 8)} • Hyperion Explorer`);
+      } else {
+        this.title.setTitle(`TX ${routeParams.transaction_id.slice(0, 8)} • ${this.chainData.chainInfoData.chain_name} Hyperion Explorer`);
+      }
+
+      // custom skynet logic
+
+      let submitAction = this.tx.actions.find(a =>
+        a.act.account == environment.gpuContract
+        &&
+        a.act.name == 'submit'
+      );
+
+      if (submitAction === undefined)
+        return;
+
+      // handle result img
+      this.hasImage = false;
+      const resultCID = submitAction.act.data.ipfs_hash;
+      if (resultCID) {
+        const link = `${environment.ipfsUrl}${resultCID}`;
+        if (await imageExists(link)) {
+          this.ipfsImageUrl = `${environment.thumborUrl}/unsafe/512x512/${encodeURIComponent(link)}`;
+          this.hasImage = true;
+        }
+      }
+
+      // maybe find a matching enqueue tx
+      let inputTxId;
+      if (environment.protocolVersion == 0) {
+        inputTxId = await this.findEnqueueTXId(routeParams.transaction_id);
+      } else {
+        inputTxId = await this.findEnqueueTXIdV1(routeParams.transaction_id);
+      }
+
+      if (inputTxId === undefined) {
+        console.error('couldnt find enqueue tx');
+        return;
+      }
+
+      const inputTx = await this.accountService.loadTxData(inputTxId);
+
+      let enqueueAction = inputTx.actions.find(a =>
+        a.act.account == environment.gpuContract
+        &&
+        a.act.name == 'enqueue'
+      );
+
+      if (enqueueAction === undefined) {
+        console.error('couldnt find enqueue action');
+        return;
+      }
+
+      const enqueueData = enqueueAction.act.data;
+      const request = JSON.parse(enqueueData.request_body);
+
+      this.inputTxText = request.params.prompt;
+      this.inputTxUrl = `${environment.hyperionApiUrl}/v2/explore/transaction/${inputTxId};`
+      this.hasInputImage = false;
+
+      // handle binary inputs to the submit
+      // TODO: only displays first input
+      if (enqueueData.binary_data) {
+        const inputs = enqueueData.binary_data.split(',');
+
+        if (inputs.length > 0) {
+          const link = `${environment.ipfsUrl}${inputs[0]}`;
+          if (await imageExists(link)) {
+            this.ipfsInputImageUrl = `${environment.thumborUrl}/unsafe/512x512/${encodeURIComponent(link)}`;
+            this.hasInputImage = true;
+          }
+        }
       }
     });
   }
@@ -164,6 +198,76 @@ export class TransactionComponent implements OnInit, OnDestroy {
     }
   }
 
+  async findEnqueueTXIdV1(submitTx: string) {
+
+    const submitData = await this.fetchTransaction(submitTx);
+    const submitAction = submitData.actions[0];
+
+    const requestId = submitAction.act.data.request_id;
+
+    let startDate = new Date(submitAction.timestamp + 'Z');
+    startDate.setSeconds(startDate.getSeconds() - 1);
+
+    console.log(requestId, startDate);
+
+    const msInAnHour = 60 * 60 * 1000; // milliseconds in an hour
+    const maxRequests = 3;
+
+    let before = startDate.getTime(); // convert startDate to ms since epoch
+    let after = before - msInAnHour;
+
+    for (let requestCounter = 0; requestCounter < maxRequests; requestCounter++) {
+      try {
+
+        const params = new URLSearchParams({
+            code: environment.gpuContract,
+            scope: environment.gpuContract,
+            table: "queue",
+            sort: "desc",
+            before: new Date(before).toISOString(),
+            after: new Date(after).toISOString(),
+        });
+
+        const url = `${environment.hyperionApiUrl}/v2/history/get_deltas?${params.toString()}`;
+        const response = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
+
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+        const data = await response.json();
+
+        let matchDelta = null;
+
+        // Find a delta with a matching hash using for-of loop.
+        for (const delta of data.deltas) {
+          if (delta.data.request_id === requestId) {
+            matchDelta = delta;
+            break;
+          }
+        }
+
+        if (!matchDelta) {
+          before -= msInAnHour;
+          after -= msInAnHour;
+          continue;
+        }
+
+        const matchBlock = await this.accountService.loadBlockDataByNumber(matchDelta.block_num);
+
+        // Find the enqueue within the block
+
+        for (const tx of matchBlock.transactions) {
+          for (const action of tx.trx.transaction.actions) {
+            if (action.data.request_id == requestId)
+              return tx.trx.id;
+          }
+        }
+      } catch (error) {
+        console.error('Error:', error);
+        break;
+      }
+    }
+  }
+
   async findEnqueueTXId(submitTx: string) {
 
     const submitData = await this.fetchTransaction(submitTx);
@@ -184,10 +288,17 @@ export class TransactionComponent implements OnInit, OnDestroy {
 
     for (let requestCounter = 0; requestCounter < maxRequests; requestCounter++) {
       try {
-        const url = `${environment.hyperionApiUrl}/v2/history/get_deltas?code=gpu.scd&scope=gpu.scd&table=queue&sort=desc&before=${new Date(before).toISOString()}&after=${new Date(after).toISOString()}`;
+        const params = new URLSearchParams({
+            code: environment.gpuContract,
+            scope: environment.gpuContract,
+            table: "queue",
+            sort: "desc",
+            before: new Date(before).toISOString(),
+            after: new Date(after).toISOString(),
+        });
 
+        const url = `${environment.hyperionApiUrl}/v2/history/get_deltas?${params.toString()}`;
         const response = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
-        console.log(response);
 
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
@@ -216,9 +327,7 @@ export class TransactionComponent implements OnInit, OnDestroy {
         // Find a transaction with a matching hash.
 
         for (const tx of matchBlock.transactions) {
-          console.log(tx);
           for (const action of tx.trx.transaction.actions) {
-            console.log(action);
             let foundNonce = null;
             // Find nonce with matching hash using for-of loop.
             for (const n of nonces) {
